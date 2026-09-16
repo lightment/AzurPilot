@@ -1282,15 +1282,15 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
             click = sidestep
         self._nearest_object_last_click = click
 
-        # 不可安全点击拦截(旧版实机验证逻辑回归)：
+        # 不可安全点击拦截：
         # 1. 与「返回大地图」按钮区域相交的格
-        # 2. 雷达虚线矩形(地图边界)之外的格——本地视野的格子对象覆盖屏幕
-        #    全部位置(含没有瓦片的地图外深色区)，点击那里会退出海域
+        # 2. 本地视野外的格——本地视野的格子对象覆盖屏幕全部位置
+        #    (含没有瓦片的地图外深色区)，点击那里会退出海域
         local = self._radar_to_local_clickable(click)
         if local is None:
             if click not in self._nearest_object_obstacles:
                 self._nearest_object_obstacles.append(click)
-            logger.info(f'[大世界-雷达] {click} 不可安全点击(视野外/按钮区/地图外)，标记为障碍')
+            logger.info(f'[大世界-雷达] {click} 不可安全点击(视野外/按钮区)，标记为障碍')
             self._nearest_object_click_timer.reset()
             return False
         self.device.click(local)
@@ -1300,9 +1300,12 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
     def _radar_to_local_clickable(self, radar_grid):
         """将雷达格转为可安全点击的本地格。
 
-        先做雷达→本地坐标转换，再排除两类不可点击位置——与「返回大
-        地图」按钮区域相交的、以及位于雷达虚线边界(地图可操作边界)
-        之外的格子。
+        先做雷达→本地坐标转换，再排除两类不可点击位置——本地视野外
+        的格，以及与「返回大地图」按钮区域相交的格(点击会退出海域)。
+
+        注：地图边界在雷达上以虚线标示，但雷达十字线与虚线视觉上难以
+        区分，检测不可靠，不再用于拦截；地图外误点由按钮区拦截和
+        "点击后未移动标记障碍"机制兜底。
 
         Args:
             radar_grid: 雷达坐标 (x, y)。
@@ -1317,141 +1320,7 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         goto_globe_areas = (MAP_GOTO_GLOBE.area, MAP_GOTO_GLOBE_FOG.area)
         if any(area_cross_area(local.button, globe_area) for globe_area in goto_globe_areas):
             return None
-        boundary = self._detect_dashed_boundary()
-        if boundary is not None:
-            rg = tuple(int(v) for v in radar_grid)
-            if (boundary['left'] is not None and rg[0] < boundary['left']) \
-                    or (boundary['right'] is not None and rg[0] > boundary['right']) \
-                    or (boundary['top'] is not None and rg[1] < boundary['top']) \
-                    or (boundary['bottom'] is not None and rg[1] > boundary['bottom']):
-                return None
         return local
-
-    def _detect_dashed_boundary(self):
-        """检测雷达上标示地图可操作区域边界的虚线矩形。
-
-        大世界地图是矩形，其边界在右上角雷达小地图上以白色分段虚线显示
-        (矩形轮廓，随舰队移动而整体平移，但始终标示地图边界)。本方法在
-        当前雷达图中检测这一虚线矩形，得到四条边在雷达坐标系的位置。
-
-        结果按时间短缓存：2 秒内复用同一份检测结果，避免同一轮寻路
-        反复做图像检测；超过 2 秒则重新检测，以跟随舰队移动后虚线
-        位置的变化（能看到的边数因位置而异）。
-
-        Returns:
-            dict | None: {'left': x, 'right': x, 'top': y, 'bottom': y}，
-                均为雷达坐标(舰队=原点)的浮点值；某侧不在视野内则为 None。
-                未检测到任何可信虚线时返回 None。
-        """
-        import time
-        if not hasattr(self, '_dashed_boundary_cache'):
-            self._dashed_boundary_cache = None
-            self._dashed_boundary_cache_ts = 0.0
-        now = time.time()
-        if self._dashed_boundary_cache is not None and (now - self._dashed_boundary_cache_ts) < 2.0:
-            return self._dashed_boundary_cache
-        result = None
-        try:
-            result = self._detect_dashed_boundary_once()
-        except Exception as e:
-            logger.warning(f'[大世界-雷达] 地图边界虚线检测异常: {e}')
-        self._dashed_boundary_cache = result
-        self._dashed_boundary_cache_ts = now
-        return result
-
-    def _detect_dashed_boundary_once(self):
-        """虚线矩形检测的实际实现(单次，可抛出异常)。"""
-        try:
-            image = self.device.image
-        except Exception:
-            return None
-        if image is None or getattr(image, 'size', 0) == 0:
-            return None
-
-        radar = self.radar
-        cx, cy = radar.center
-        # 雷达半径(像素)：格距 * 半径格数。Radar 构造时仅用局部变量 radius
-        # 生成 shape，半径格数从 shape 推导。
-        radius_int = abs(radar.shape[0][0])
-        radius_px = int(radar.delta[0] * radius_int)
-        # 裁剪略大于雷达圆盘的区域
-        pad = int(radius_px * 0.25)
-        x0, x1 = int(cx - radius_px - pad), int(cx + radius_px + pad)
-        y0, y1 = int(cy - radius_px - pad), int(cy + radius_px + pad)
-        h_img, w_img = image.shape[:2] if image.ndim == 3 else image.shape
-        x0, y0 = max(0, x0), max(0, y0)
-        x1, y1 = min(w_img, x1), min(h_img, y1)
-        crop = image[y0:y1, x0:x1]
-        if crop.size == 0:
-            return None
-
-        # 转灰度并提取高亮度(白色)像素
-        gray = 0.114 * crop[..., 0] + 0.587 * crop[..., 1] + 0.299 * crop[..., 2]
-        white = gray > 185  # 白色虚线
-
-        # 地图边界虚线由短白色线段等距排列；对每行/列统计"连续白段数"，
-        # 虚线段行/列有多个不相连的白段(>=3)，实线只有 1 段。
-        hh, ww = white.shape
-
-        def _segments_count(seq):
-            seq = np.asarray(seq, dtype=bool)
-            if seq.size == 0:
-                return 0
-            d = np.diff(seq.astype(np.int8))
-            return int(np.sum(d == 1))
-
-        h_seg = np.array([_segments_count(white[r]) for r in range(hh)], dtype=np.int32)
-        v_seg = np.array([_segments_count(white[:, c]) for c in range(ww)], dtype=np.int32)
-
-        h_dash = np.where(h_seg >= 3)[0]
-        v_dash = np.where(v_seg >= 3)[0]
-
-        # 舰队位于地图内部，任何一条边界虚线只会落在舰队一侧：按舰队
-        # 中心把虚线段拆到两侧、每侧取最靠外侧的那条；缺边方向保持
-        # None(拦截时跳过该方向，不误拦)。
-        boundary = self._assign_boundaries(
-            v_dash, h_dash,
-            int(cx - x0), int(cy - y0),
-            float(radar.delta[0]), float(radar.delta[1]),
-        )
-        # 至少检测到一条边即可用于拦截；全部为空才返回 None
-        if all(v is None for v in boundary.values()):
-            return None
-        logger.debug(f'[大世界-雷达] 地图边界虚线: '
-                     f'left={boundary["left"]} right={boundary["right"]} '
-                     f'top={boundary["top"]} bottom={boundary["bottom"]}')
-        return boundary
-
-    @staticmethod
-    def _assign_boundaries(v_dash, h_dash, center_col, center_row, delta_x, delta_y):
-        """把检测到的虚线段行列按舰队中心分侧，分配上下左右四条边界。
-
-        单个方向上有多条虚线段时取最靠外侧的那条；缺边方向保持 None。
-
-        Args:
-            v_dash: 垂直虚线段所在像素列(升序 numpy 数组)。
-            h_dash: 水平虚线段所在像素行(升序 numpy 数组)。
-            center_col: 雷达中心(舰队)在裁剪图中的像素列。
-            center_row: 雷达中心(舰队)在裁剪图中的像素行。
-            delta_x/delta_y: 每雷达格对应的像素数。
-
-        Returns:
-            dict: {'left','right','top','bottom'}，雷达坐标浮点值，缺边为 None。
-        """
-        boundary = {'left': None, 'right': None, 'top': None, 'bottom': None}
-        left_cols = v_dash[v_dash < center_col]
-        right_cols = v_dash[v_dash > center_col]
-        if len(left_cols):
-            boundary['left'] = float((left_cols[0] - center_col) / delta_x)
-        if len(right_cols):
-            boundary['right'] = float((right_cols[-1] - center_col) / delta_x)
-        top_rows = h_dash[h_dash < center_row]
-        bottom_rows = h_dash[h_dash > center_row]
-        if len(top_rows):
-            boundary['top'] = float((top_rows[0] - center_row) / delta_y)
-        if len(bottom_rows):
-            boundary['bottom'] = float((bottom_rows[-1] - center_row) / delta_y)
-        return boundary
 
     def _nearest_object_radar_signature(self):
         """雷达实体布局指纹：所有目标格坐标的集合。
