@@ -1148,15 +1148,22 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         self.radar.predict(self.device.image)
         self.radar.show()
 
-        # ⑥ 镜头恢复：当前舰队不在镜头内时，呼出菜单强制聚焦
+        # ⑥ 只认配置的主舰队：检测当前实际舰队，非主舰队则暂停寻路，避免手动切到其他舰队
+        # 做任务时脚本仍为第一舰队寻路。get() 读地图舰队编号标签，识别失败(0)时跳过检测。
+        current_fleet_no = self.fleet_selector.get()
+        primary_fleet = self.config.OpsiFleet_Fleet
+        if current_fleet_no > 0 and current_fleet_no != primary_fleet:
+            logger.info(f'[大世界-雷达] 当前处于舰队 {current_fleet_no}，与配置主舰队 {primary_fleet} 不符，暂停寻路（切回主舰队后继续）')
+            self._nearest_object_click_timer.reset()
+            return False
+
+        # ⑥ 镜头恢复：当前舰队不在镜头内时，呼出菜单强制聚焦主舰队
         fleets = self.view.select(is_current_fleet=True)
         if fleets.count == 0:
             if self._nearest_object_camera_lost_count < 3 \
                     or self._nearest_object_camera_recover_timer.reached():
-                logger.info('[大世界-雷达] 镜头未跟随舰队，呼出菜单重新聚焦到第一舰队')
-                # 大世界半自动固定以第一舰队为操作舰队，镜头跟丢时无条件回到第一舰队，
-                # 不依赖 get() 识别（get() 匹配地图可见编号，可能点到其它舰队）。
-                if self.fleet_selector.focus(1):
+                logger.info(f'[大世界-雷达] 镜头未跟随舰队，呼出菜单重新聚焦到主舰队 {primary_fleet}')
+                if self.fleet_selector.focus(primary_fleet):
                     self.wait_until_camera_stable()
                     self._nearest_object_camera_lost_count = 0
                     self._nearest_object_camera_recover_timer.reset()
