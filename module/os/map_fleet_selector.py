@@ -173,6 +173,35 @@ class FleetSelector:
                 main.device.click(button)
                 click_timer.reset()
 
+    def focus(self, index):
+        """呼出下拉菜单并点击指定舰队，使视角跳回该舰队。
+
+        与 click() 不同：click() 在菜单未打开且当前已是该舰队时会直接跳过，
+        无法把已经不在当前舰队视角的镜头拉回。focus() 无条件打开菜单并点击，
+        用于镜头跟丢后的强制恢复。
+
+        Args:
+            index (int): 舰队索引 1-4。
+        """
+        main = self.main
+        button = self.get_button(index)
+        click_timer = Timer(3, count=6)
+        for _ in main.loop(timeout=10):
+            if main.handle_map_event():
+                click_timer.reset()
+                continue
+
+            if self.bar_opened():
+                main.device.click(button)
+                return True
+
+            if click_timer.reached():
+                main.device.click(self._choose)
+                click_timer.reset()
+
+        logger.warning('[大世界-舰队选择] 下拉菜单未能打开')
+        return False
+
     def ensure_to_be(self, index):
         """
         Set to a specific fleet.

@@ -419,14 +419,18 @@ class Radar:
 
         return None
 
-    def nearest_object(self, camera_sight=(-4, -3, 3, 3)):
+    def nearest_object(self, camera_sight=(-4, -3, 3, 3), exclude=None):
         """
         Args:
             camera_sight:
+            exclude (list[tuple]): 已放弃目标的截断格列表，跳过这些目标
+                让雷达切换下一个。截断格指 point_limit(目标.location,
+                camera_sight) 的结果，与下方判定一致。
 
         Returns:
             RadarGrid: Or None if no objects
         """
+        exclude = {tuple(e) for e in (exclude or [])}
         objects = []
         for grid in self:
             if grid.is_port:
@@ -438,9 +442,11 @@ class Radar:
         if not objects:
             return None
 
-        nearest = objects[0]
-        limited = point_limit(nearest.location, area=camera_sight)
-        if nearest.location == limited:
-            return nearest
-        else:
+        for nearest in objects:
+            limited = point_limit(nearest.location, area=camera_sight)
+            if tuple(limited) in exclude:
+                continue
+            if nearest.location == limited:
+                return nearest
             return self[limited]
+        return None

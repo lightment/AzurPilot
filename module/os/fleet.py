@@ -1121,6 +1121,12 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         return grids[np.argmax(degree)]
 
     _nearest_object_click_timer = Timer(2)
+    # 卡死自愈状态。设计原则：点击决策保持作者原版"直接点最近目标"，
+    # 附加机制只做"点击后舰队没动"的检测与自愈，不干预正常路径。
+    _nearest_object_last_homo = None  # 上次点击时刻的镜头全局位置(单应位置)
+    _nearest_object_stuck_count = 0   # 连续点击后舰队未移动的次数
+    _nearest_object_focused = False   # 本轮卡死周期内是否已执行过镜头恢复
+    _nearest_object_abandoned = []    # 已放弃目标的截断格列表
 
     def click_nearest_object(self):
         if not self._nearest_object_click_timer.reached():
@@ -1134,10 +1140,69 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         self.view.predict()
         self.radar.predict(self.device.image)
         self.radar.show()
-        nearest = self.radar.nearest_object()
+
+        # 只认配置的主舰队：非主舰队时暂停寻路。防止误点其他舰队(2/3/4)
+        # 导致镜头切换后坐标系错乱，以及手动切舰队做任务时脚本乱点。
+        # get() 读地图左侧舰队编号标签(需先截图)，识别失败(0)时跳过检测。
+        primary_fleet = self.config.OpsiFleet_Fleet
+        current_fleet_no = self.fleet_selector.get()
+        if current_fleet_no > 0 and current_fleet_no != primary_fleet:
+            logger.info(f'[大世界-雷达] 当前处于舰队 {current_fleet_no}，与配置主舰队 {primary_fleet} 不符，'
+                        '暂停寻路（切回主舰队后继续）')
+            return False
+
+        nearest = self.radar.nearest_object(exclude=self._nearest_object_abandoned)
         if nearest is None:
+            # 可见目标全部放弃：清空重来，避免永久卡死
+            if self._nearest_object_abandoned:
+                logger.info('[大世界-雷达] 可见目标均已放弃，清空放弃列表重新寻路')
+                self._nearest_object_abandoned = []
+                self._nearest_object_stuck_count = 0
+                self._nearest_object_focused = False
             self._nearest_object_click_timer.reset()
             return False
+
+        # 卡死检测：比较上次点击时刻与当前的镜头全局位置(单应位置)。
+        # 镜头跟随舰队时舰队在本地视野恒位于 center_loca，不能用本地坐标
+        # 判移动；homo_loca 是镜头的全局位置，舰队移动一格变化上百像素，
+        # 检测噪声±3px，阈值 8px 区分。
+        # 连续卡住 → 先 focus() 恢复镜头(处理镜头丢失/被移动敌人甩走)，
+        # 仍卡住 → 放弃该目标换下一个(处理不可达/追不上的目标)。
+        homo = self.view.backend.homo_loca
+        if self._nearest_object_last_homo is not None and homo is not None:
+            moved = np.linalg.norm(
+                np.array(homo, dtype=float)
+                - np.array(self._nearest_object_last_homo, dtype=float)) > 8
+            if moved:
+                self._nearest_object_stuck_count = 0
+                self._nearest_object_focused = False
+            else:
+                self._nearest_object_stuck_count += 1
+                logger.info(f'[大世界-雷达] 点击后舰队未移动 '
+                            f'({self._nearest_object_stuck_count})')
+                if self._nearest_object_stuck_count >= 5 and not self._nearest_object_focused:
+                    logger.info('[大世界-雷达] 连续点击舰队未移动，呼出菜单恢复镜头到主舰队')
+                    if self.fleet_selector.focus(primary_fleet):
+                        self.wait_until_camera_stable()
+                    self._nearest_object_focused = True
+                    # 镜头已恢复，本轮 view/radar 数据已过期，下轮重新预测寻路
+                    self._nearest_object_click_timer.reset()
+                    return False
+                elif self._nearest_object_stuck_count >= 8:
+                    abandoned = tuple(int(x) for x in point_limit(
+                        nearest.location, area=(-4, -3, 3, 3)))
+                    logger.info(f'[大世界-雷达] 连续点击舰队未移动，放弃目标 {nearest.location} '
+                                f'(截断格 {abandoned})，切换下一个')
+                    if abandoned not in self._nearest_object_abandoned:
+                        if len(self._nearest_object_abandoned) >= 4:
+                            self._nearest_object_abandoned = []
+                        self._nearest_object_abandoned.append(abandoned)
+                    self._nearest_object_stuck_count = 0
+                    self._nearest_object_focused = False
+                    # 已放弃本轮目标，不再点击它，下轮换目标
+                    self._nearest_object_click_timer.reset()
+                    return False
+        self._nearest_object_last_homo = tuple(homo) if homo is not None else None
 
         step = 1 if self.appear(FLEET_EMP_DEBUFF, offset=(50, 20)) else 3
         nearest = self.fleet_walk_limit(nearest.location, step=step)
