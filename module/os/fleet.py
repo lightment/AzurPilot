@@ -1153,10 +1153,10 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         if fleets.count == 0:
             if self._nearest_object_camera_lost_count < 3 \
                     or self._nearest_object_camera_recover_timer.reached():
-                logger.info('[大世界-雷达] 镜头未跟随舰队，呼出菜单重新聚焦')
-                index = self.fleet_selector.get()
-                if index > 0:
-                    self.fleet_selector.focus(index)
+                logger.info('[大世界-雷达] 镜头未跟随舰队，呼出菜单重新聚焦到第一舰队')
+                # 大世界半自动固定以第一舰队为操作舰队，镜头跟丢时无条件回到第一舰队，
+                # 不依赖 get() 识别（get() 匹配地图可见编号，可能点到其它舰队）。
+                if self.fleet_selector.focus(1):
                     self.wait_until_camera_stable()
                     self._nearest_object_camera_lost_count = 0
                     self._nearest_object_camera_recover_timer.reset()
@@ -1244,9 +1244,8 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
             for dx, dy in sidesteps:
                 candidate = (current_fleet[0] + dx, current_fleet[1] + dy)
                 if candidate in self.radar and candidate not in self._nearest_object_blocked:
-                    try:
-                        local = self.convert_radar_to_local(candidate)
-                    except KeyError:
+                    local = self._radar_to_local_clickable(candidate)
+                    if local is None:
                         continue
                     self._nearest_object_stuck_count = 0
                     self._nearest_object_last_click = candidate
@@ -1262,6 +1261,30 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
     def _normalize_coord(loc):
         """将 numpy/int 元组统一转为纯 int 元组，保证封锁/放弃匹配稳定。"""
         return tuple(int(x) for x in loc)
+
+    def _radar_to_local_clickable(self, radar_grid):
+        """将雷达格转为可安全点击的本地格。
+
+        与 _click_first_available 共用：先做雷达→本地坐标转换，再排除两类
+        不可点击位置——与「返回大地图」按钮区域相交的、以及位于地图网格
+        边界之外(点击会退出大世界地图)的格子。
+
+        Args:
+            radar_grid: 雷达坐标 (x, y)。
+
+        Returns:
+            OSGrid or None: None 表示该格不可安全点击。
+        """
+        try:
+            local = self.convert_radar_to_local(radar_grid)
+        except KeyError:
+            # 目标格不在当前镜头视野内（含地图边界外的格子）→ 不可安全点击
+            return None
+        goto_globe_areas = (MAP_GOTO_GLOBE.area, MAP_GOTO_GLOBE_FOG.area)
+        if any(area_cross_area(local.button, globe_area) for globe_area in goto_globe_areas):
+            # 该格与「返回大地图」按钮区域相交，点击会退出大世界地图
+            return None
+        return local
 
     def _step_toward_object(self):
         """朝雷达上最近的远距离目标方向，在镜头内走一步。
@@ -1295,13 +1318,8 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
             return False
         candidates.sort(key=lambda item: item[0], reverse=True)
         for _, candidate in candidates:
-            try:
-                local = self.convert_radar_to_local(candidate)
-            except KeyError:
-                continue
-            local_area = local.button
-            goto_globe_areas = (MAP_GOTO_GLOBE.area, MAP_GOTO_GLOBE_FOG.area)
-            if any(area_cross_area(local_area, globe_area) for globe_area in goto_globe_areas):
+            local = self._radar_to_local_clickable(candidate)
+            if local is None:
                 continue
             logger.info(f'[大世界-雷达] 目标 {target} 在镜头外，朝其方向推进一格 {candidate}')
             self._nearest_object_last_click = candidate
@@ -1313,17 +1331,10 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
 
     def _click_first_available(self, candidates, current_fleet):
         """依次点击候选格中可转换为本地坐标的最近一格。返回是否执行点击。"""
-        goto_globe_areas = (MAP_GOTO_GLOBE.area, MAP_GOTO_GLOBE_FOG.area)
         for candidate in candidates:
-            try:
-                local = self.convert_radar_to_local(candidate)
-            except KeyError:
-                # 该格不在本地视野，尝试下一个候选
-                continue
-            # 防误触：若本格与「返回大地图」按钮区域相交，跳过。点击此处会退出大世界地图
-            local_area = local.button
-            if any(area_cross_area(local_area, globe_area) for globe_area in goto_globe_areas):
-                logger.info(f'[大世界-雷达] 候选 {candidate} 落在返回大地图按钮区域，跳过')
+            local = self._radar_to_local_clickable(candidate)
+            if local is None:
+                # 该格不可安全点击(不在视野/落在返回大地图按钮/地图边界外)，尝试下一个候选
                 continue
             self._nearest_object_last_click = candidate
             self._nearest_object_last_fleet = current_fleet
