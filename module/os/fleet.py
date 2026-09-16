@@ -1127,6 +1127,9 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
     _nearest_object_stuck_count = 0   # 连续点击后舰队未移动的次数
     _nearest_object_focused = False   # 本轮卡死周期内是否已执行过镜头恢复
     _nearest_object_abandoned = []    # 已放弃目标的截断格列表
+    # 雷达目标选择的视野截断范围，必须与 radar.nearest_object 的默认
+    # camera_sight 保持一致：放弃目标时用同一范围算截断格，拉黑才不会失配
+    NEAREST_OBJECT_CAMERA_SIGHT = (-4, -3, 3, 3)
 
     def click_nearest_object(self):
         if not self._nearest_object_click_timer.reached():
@@ -1151,7 +1154,9 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
                         '暂停寻路（切回主舰队后继续）')
             return False
 
-        nearest = self.radar.nearest_object(exclude=self._nearest_object_abandoned)
+        nearest = self.radar.nearest_object(
+            camera_sight=self.NEAREST_OBJECT_CAMERA_SIGHT,
+            exclude=self._nearest_object_abandoned)
         if nearest is None:
             # 可见目标全部放弃：清空重来，避免永久卡死
             if self._nearest_object_abandoned:
@@ -1190,7 +1195,7 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
                     return False
                 elif self._nearest_object_stuck_count >= 8:
                     abandoned = tuple(int(x) for x in point_limit(
-                        nearest.location, area=(-4, -3, 3, 3)))
+                        nearest.location, area=self.NEAREST_OBJECT_CAMERA_SIGHT))
                     logger.info(f'[大世界-雷达] 连续点击舰队未移动，放弃目标 {nearest.location} '
                                 f'(截断格 {abandoned})，切换下一个')
                     if abandoned not in self._nearest_object_abandoned:
