@@ -28,7 +28,7 @@ import numpy as np
 from module.base.button import Button, ButtonGrid
 from module.base.filter import Filter
 from module.base.timer import Timer
-from module.base.utils import point_limit
+from module.base.utils import area_cross_area, point_limit
 from module.config.utils import dict_to_kv
 from module.exception import MapWalkError
 from module.handler.assets import MAINTENANCE_ANNOUNCE
@@ -38,7 +38,7 @@ from module.map.map_grids import SelectedGrids
 from module.map.utils import location_ensure
 from module.map_detection.utils import area2corner, corner2inner
 from module.ocr.ocr import Ocr
-from module.os.assets import FLEET_EMP_DEBUFF, MAP_EXIT, MAP_GOTO_GLOBE, STRONGHOLD_PERCENTAGE, TEMPLATE_EMPTY_HP
+from module.os.assets import FLEET_EMP_DEBUFF, MAP_EXIT, MAP_GOTO_GLOBE, MAP_GOTO_GLOBE_FOG, STRONGHOLD_PERCENTAGE, TEMPLATE_EMPTY_HP
 from module.os.camera import OSCamera
 from module.os.map_base import OSCampaignMap
 from module.os_ash.ash import OSAsh
@@ -1121,31 +1121,159 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         return grids[np.argmax(degree)]
 
     _nearest_object_click_timer = Timer(2)
+    # 目标级放弃：被封锁的方向(截断格+判别为不可达)与已放弃的目标
+    _nearest_object_blocked = []
+    _nearest_object_blocked_limit = 12  # 封锁方向数量上限，防止攒满后无路可走卡死
+    _nearest_object_blocked_objects = []
+    _nearest_object_blocked_objects_limit = 6  # 放弃目标数量上限，防止无限累积导致无可寻目标卡死
+    _nearest_object_last_click = None
+    _nearest_object_last_fleet = None
+    _nearest_object_stuck_count = 0  # 连续未移动次数，用于侧翼绕行打破死胡同
+    # 镜头恢复重试
+    _nearest_object_camera_lost_count = 0
+    _nearest_object_camera_recover_timer = Timer(30)
 
     def click_nearest_object(self):
         if not self._nearest_object_click_timer.reached():
             return False
         if not self.appear(MAP_GOTO_GLOBE, offset=(200, 20)):
+            logger.info('[大世界-雷达] 未检测到 MAP_GOTO_GLOBE(作战总览)按钮，跳过寻路')
             return False
         if self.appear(PORT_ENTER, offset=(20, 20)):
+            logger.info('[大世界-雷达] 检测到港口入口，跳过寻路')
             return False
 
         self.update_os()
         self.view.predict()
         self.radar.predict(self.device.image)
         self.radar.show()
-        nearest = self.radar.nearest_object()
+
+        # ⑥ 镜头恢复：当前舰队不在镜头内时，呼出菜单强制聚焦
+        fleets = self.view.select(is_current_fleet=True)
+        if fleets.count == 0:
+            if self._nearest_object_camera_lost_count < 3 \
+                    or self._nearest_object_camera_recover_timer.reached():
+                logger.info('[大世界-雷达] 镜头未跟随舰队，呼出菜单重新聚焦')
+                index = self.fleet_selector.get()
+                if index > 0:
+                    self.fleet_selector.focus(index)
+                    self.wait_until_camera_stable()
+                    self._nearest_object_camera_lost_count = 0
+                    self._nearest_object_camera_recover_timer.reset()
+                else:
+                    self._nearest_object_camera_lost_count += 1
+            else:
+                self._nearest_object_camera_lost_count += 1
+            self._nearest_object_click_timer.reset()
+            return False
+
+        current_fleet = tuple(int(x) for x in fleets[0].location) if len(fleets) > 0 else None
+        # 监控点击是否让舰队移动，未移动则临时封锁该方向
+        if self._nearest_object_last_click is not None:
+            if current_fleet == self._nearest_object_last_fleet:
+                self._nearest_object_stuck_count += 1
+                blocked = self._normalize_coord(self._nearest_object_last_click)
+                if blocked not in self._nearest_object_blocked:
+                    # 封锁数达到上限则整体清空重来，避免攒满无路可走卡死
+                    if len(self._nearest_object_blocked) >= self._nearest_object_blocked_limit:
+                        self._nearest_object_blocked = []
+                        self._nearest_object_stuck_count = 0
+                    self._nearest_object_blocked.append(blocked)
+                    logger.info(f'[大世界-雷达] 点击偏移 {blocked} 舰队未移动，封锁该方向')
+            else:
+                # 舰队确实移动了，说明路是通的，重置卡住状态与封锁
+                self._nearest_object_blocked = []
+                self._nearest_object_blocked_objects = []
+                self._nearest_object_stuck_count = 0
+
+        nearest = self.radar.nearest_object(exclude=self._nearest_object_blocked_objects)
         if nearest is None:
+            # 无可寻目标：通常是因为放弃列表把可见目标全排除了。
+            # 清空放弃列表重试，避免无限静默卡住
+            if self._nearest_object_blocked_objects:
+                self._nearest_object_blocked_objects = []
+                logger.info('[大世界-雷达] 无可寻目标，清空放弃列表重试')
             self._nearest_object_click_timer.reset()
             return False
 
         step = 1 if self.appear(FLEET_EMP_DEBUFF, offset=(50, 20)) else 3
-        nearest = self.fleet_walk_limit(nearest.location, step=step)
-        try:
-            nearest = self.convert_radar_to_local(nearest)
-        except KeyError:
-            logger.info('[大世界-雷达] 雷达格子不在本地地图上')
-            self._nearest_object_click_timer.reset()
-            return False
-        self.device.click(nearest)
+
+        # ⑤⑦ 候选收缩 + 分步接近：优先目标格本身，再纳入其 8 邻域，按距目标远近排序尝试
+        intended = self._normalize_coord(self.fleet_walk_limit(nearest.location, step=step))
+        candidates = {
+            intended,
+            self._normalize_coord(nearest.location),  # 敌人格本身优先，避免被方向格顶替
+        }
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                candidates.add((intended[0] + dx, intended[1] + dy))
+        # 过滤已在雷达上的格子，并按与目标的距离排序
+        candidates = [
+            self._normalize_coord(c) for c in candidates
+            if c in self.radar and self._normalize_coord(c) not in self._nearest_object_blocked
+        ]
+        candidates.sort(key=lambda c: np.linalg.norm(
+            np.array(c) - np.array(nearest.location)))
+
+        clicked = self._click_first_available(candidates, current_fleet)
+        if clicked is not None:
+            return clicked
+
+        # 所有候选(9 格)都不可达(已封锁或不在本地视野)：目标级放弃，切换下一个
+        limited = self._normalize_coord(point_limit(nearest.location, area=(-4, -3, 3, 3)))
+        if tuple(limited) not in self._nearest_object_blocked_objects:
+            # 放弃目标达到上限则清空重来，避免全部目标被放弃后无可寻
+            if len(self._nearest_object_blocked_objects) >= self._nearest_object_blocked_objects_limit:
+                self._nearest_object_blocked_objects = []
+            self._nearest_object_blocked_objects.append(tuple(limited))
+            logger.info(f'[大世界-雷达] 目标 {tuple(limited)} 不可达，放弃并切换下一个')
+
+        # 连续卡住超阈值：尝试侧翼/后方绕行一格，打破死胡同，避免原地打转卡死
+        if self._nearest_object_stuck_count >= 4:
+            logger.info(f'[大世界-雷达] 连续未移动 {self._nearest_object_stuck_count} 次，尝试侧翼绕行')
+            sidesteps = [
+                (1, 0), (-1, 0), (0, 1), (0, -1),
+                (1, 1), (1, -1), (-1, 1), (-1, -1),
+            ]
+            for dx, dy in sidesteps:
+                candidate = (current_fleet[0] + dx, current_fleet[1] + dy)
+                if candidate in self.radar and candidate not in self._nearest_object_blocked:
+                    try:
+                        local = self.convert_radar_to_local(candidate)
+                    except KeyError:
+                        continue
+                    self._nearest_object_stuck_count = 0
+                    self._nearest_object_last_click = candidate
+                    self._nearest_object_last_fleet = current_fleet
+                    self.device.click(local)
+                    self._nearest_object_click_timer.reset()
+                    return True
+
         self._nearest_object_click_timer.reset()
+        return False
+
+    @staticmethod
+    def _normalize_coord(loc):
+        """将 numpy/int 元组统一转为纯 int 元组，保证封锁/放弃匹配稳定。"""
+        return tuple(int(x) for x in loc)
+
+    def _click_first_available(self, candidates, current_fleet):
+        """依次点击候选格中可转换为本地坐标的最近一格。返回是否执行点击。"""
+        goto_globe_areas = (MAP_GOTO_GLOBE.area, MAP_GOTO_GLOBE_FOG.area)
+        for candidate in candidates:
+            try:
+                local = self.convert_radar_to_local(candidate)
+            except KeyError:
+                # 该格不在本地视野，尝试下一个候选
+                continue
+            # 防误触：若本格与「返回大地图」按钮区域相交，跳过。点击此处会退出大世界地图
+            local_area = local.button
+            if any(area_cross_area(local_area, globe_area) for globe_area in goto_globe_areas):
+                logger.info(f'[大世界-雷达] 候选 {candidate} 落在返回大地图按钮区域，跳过')
+                continue
+            self._nearest_object_last_click = candidate
+            self._nearest_object_last_fleet = current_fleet
+            self.device.click(local)
+            self._nearest_object_click_timer.reset()
+            return True
+        return None
