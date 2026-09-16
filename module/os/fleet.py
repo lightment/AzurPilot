@@ -1320,8 +1320,10 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
 
         radar = self.radar
         cx, cy = radar.center
-        # 雷达半径(像素)：格距 * 半径格数
-        radius_px = int(radar.delta[0] * radar.radius)
+        # 雷达半径(像素)：格距 * 半径格数。注意本项目的 Radar 并不保存 radius
+        # 属性(构造时仅用局部变量 radius 生成 shape)，半径格数从 shape 推导。
+        radius_int = abs(radar.shape[0][0])
+        radius_px = int(radar.delta[0] * radius_int)
         # 裁剪略大于雷达圆盘的区域
         pad = int(radius_px * 0.25)
         x0, x1 = int(cx - radius_px - pad), int(cx + radius_px + pad)
