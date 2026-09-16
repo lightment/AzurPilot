@@ -1125,11 +1125,24 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
     # 附加机制只做"点击后舰队没动"的检测与自愈，不干预正常路径。
     _nearest_object_last_homo = None  # 上次点击时刻的镜头全局位置(单应位置)
     _nearest_object_stuck_count = 0   # 连续点击后舰队未移动的次数
-    _nearest_object_focused = False   # 本轮卡死周期内是否已执行过镜头恢复
+    _nearest_object_last_focus_stuck = 0  # 上次镜头恢复时的 stuck 计数
     _nearest_object_abandoned = []    # 已放弃目标的截断格列表
+    _nearest_object_last_click = None  # 上次点击的雷达格(舰队原点坐标系)
+    _nearest_object_obstacles = []     # 障碍格列表(岛屿/被挡)。舰队没动期间
+    # 雷达坐标系不变、标记有效；舰队一旦移动即整体清空(坐标系已漂移)。
+    _nearest_object_detour_steps = 0  # 绕行移动累计步数(正常推进成功即清零)
+    _nearest_object_last_signature = None  # 上轮雷达实体布局指纹
     # 雷达目标选择的视野截断范围，必须与 radar.nearest_object 的默认
     # camera_sight 保持一致：放弃目标时用同一范围算截断格，拉黑才不会失配
     NEAREST_OBJECT_CAMERA_SIGHT = (-4, -3, 3, 3)
+    # 连续点击未移动的次数阈值：达 2 次且舰队偏离镜头中心 → 恢复镜头；
+    # 达 3 次且舰队在镜头中心 → 标记点击格为障碍改走侧翼；达 10 次 →
+    # 兜底放弃目标(防状态机卡死)
+    NEAREST_OBJECT_FOCUS_STUCK = 2
+    NEAREST_OBJECT_OBSTACLE_STUCK = 3
+    NEAREST_OBJECT_ABANDON_STUCK = 10
+    # 绕行步数上限：超过说明地形封死通往该目标的路径，放弃换下一个
+    NEAREST_OBJECT_DETOUR_LIMIT = 8
 
     def click_nearest_object(self):
         if not self._nearest_object_click_timer.reached():
@@ -1163,59 +1176,193 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
                 logger.info('[大世界-雷达] 可见目标均已放弃，清空放弃列表重新寻路')
                 self._nearest_object_abandoned = []
                 self._nearest_object_stuck_count = 0
-                self._nearest_object_focused = False
+                self._nearest_object_last_focus_stuck = 0
             self._nearest_object_click_timer.reset()
             return False
 
-        # 卡死检测：比较上次点击时刻与当前的镜头全局位置(单应位置)。
-        # 镜头跟随舰队时舰队在本地视野恒位于 center_loca，不能用本地坐标
-        # 判移动；homo_loca 是镜头的全局位置，舰队移动一格变化上百像素，
-        # 检测噪声±3px，阈值 8px 区分。
-        # 连续卡住 → 先 focus() 恢复镜头(处理镜头丢失/被移动敌人甩走)，
-        # 仍卡住 → 放弃该目标换下一个(处理不可达/追不上的目标)。
+        # 目标截断格：拉黑与侧翼方向计算使用
         homo = self.view.backend.homo_loca
+        target = tuple(int(x) for x in point_limit(
+            nearest.location, area=self.NEAREST_OBJECT_CAMERA_SIGHT))
+
+        # 卡死检测：判定"点击后舰队是否移动"用双信号。
+        # 信号1 homo_loca：镜头相对瓦片网格的偏移，模 HOMO_TILE 周期值，
+        #   整格移动同余不变(实测部分移动仅 1px 抖动)，单用会漏判；
+        # 信号2 雷达实体指纹：雷达以舰队为原点，舰队一动所有目标坐标整体
+        #   平移、指纹必变；真卡死时目标静止、指纹不变。
+        # 两者任一变化即判移动——宁可误判移动(仅重置计数，代价小)，
+        # 不可漏判(会误标障碍格、误放弃目标)。
+        signature = self._nearest_object_radar_signature()
         if self._nearest_object_last_homo is not None and homo is not None:
-            moved = np.linalg.norm(
+            homo_moved = np.linalg.norm(
                 np.array(homo, dtype=float)
                 - np.array(self._nearest_object_last_homo, dtype=float)) > 8
+            sig_moved = self._nearest_object_last_signature is not None \
+                and signature != self._nearest_object_last_signature
+            moved = homo_moved or sig_moved
             if moved:
+                if self._nearest_object_obstacles:
+                    # 绕行移动成功：障碍格坐标已随舰队移动失效，整体清空；
+                    # 累计绕行步数，超限说明地形封死该目标，放弃换下一个
+                    self._nearest_object_obstacles = []
+                    self._nearest_object_detour_steps += 1
+                    logger.info(f'[大世界-雷达] 绕行推进 ({self._nearest_object_detour_steps})')
+                    if self._nearest_object_detour_steps >= self.NEAREST_OBJECT_DETOUR_LIMIT:
+                        logger.info('[大世界-雷达] 绕行步数达上限，放弃该目标')
+                        self._abandon_nearest_object(target)
+                        self._nearest_object_click_timer.reset()
+                        return False
+                else:
+                    # 正常推进成功：绕行状态结束
+                    self._nearest_object_detour_steps = 0
                 self._nearest_object_stuck_count = 0
-                self._nearest_object_focused = False
+                self._nearest_object_last_focus_stuck = 0
             else:
                 self._nearest_object_stuck_count += 1
                 logger.info(f'[大世界-雷达] 点击后舰队未移动 '
                             f'({self._nearest_object_stuck_count})')
-                if self._nearest_object_stuck_count >= 5 and not self._nearest_object_focused:
-                    logger.info('[大世界-雷达] 连续点击舰队未移动，呼出菜单恢复镜头到主舰队')
-                    if self.fleet_selector.focus(primary_fleet):
-                        self.wait_until_camera_stable()
-                    self._nearest_object_focused = True
-                    # 镜头已恢复，本轮 view/radar 数据已过期，下轮重新预测寻路
-                    self._nearest_object_click_timer.reset()
-                    return False
-                elif self._nearest_object_stuck_count >= 8:
-                    abandoned = tuple(int(x) for x in point_limit(
-                        nearest.location, area=self.NEAREST_OBJECT_CAMERA_SIGHT))
-                    logger.info(f'[大世界-雷达] 连续点击舰队未移动，放弃目标 {nearest.location} '
-                                f'(截断格 {abandoned})，切换下一个')
-                    if abandoned not in self._nearest_object_abandoned:
-                        if len(self._nearest_object_abandoned) >= 4:
-                            self._nearest_object_abandoned = []
-                        self._nearest_object_abandoned.append(abandoned)
-                    self._nearest_object_stuck_count = 0
-                    self._nearest_object_focused = False
-                    # 已放弃本轮目标，不再点击它，下轮换目标
+                # 区分镜头问题与地形问题：镜头跟丢时舰队不在视野或偏离中心
+                fleets = self.view.select(is_current_fleet=True)
+                if fleets.count > 0:
+                    offset = np.array(fleets[0].location, dtype=float) \
+                        - np.array(self.view.center_loca, dtype=float)
+                    camera_lost = np.linalg.norm(offset) > 2.5
+                else:
+                    camera_lost = True
+                if camera_lost:
+                    # 每 3 次未移动重试一次镜头恢复(focus 自身有失败可能，
+                    # 单次标志位会卡死在"已恢复过但没成功"的状态)
+                    if self._nearest_object_stuck_count \
+                            >= self._nearest_object_last_focus_stuck + self.NEAREST_OBJECT_FOCUS_STUCK:
+                        logger.info('[大世界-雷达] 舰队不在镜头中心，呼出菜单恢复镜头到主舰队')
+                        if self.fleet_selector.focus(primary_fleet):
+                            self.wait_until_camera_stable()
+                        self._nearest_object_last_focus_stuck = self._nearest_object_stuck_count
+                        # 镜头已恢复，本轮 view/radar 数据已过期，下轮重新预测寻路
+                        self._nearest_object_click_timer.reset()
+                        return False
+                elif self._nearest_object_stuck_count >= self.NEAREST_OBJECT_OBSTACLE_STUCK \
+                        and self._nearest_object_last_click is not None:
+                    # 舰队在镜头中心但没动：上次点击的格不可达(岛屿地形/
+                    # 路径被挡)。标记为障碍格，本轮点击前会自动改走侧翼。
+                    # 舰队没动雷达坐标系不变，标记跨轮有效。
+                    click = tuple(int(x) for x in self._nearest_object_last_click)
+                    if click not in self._nearest_object_obstacles:
+                        if len(self._nearest_object_obstacles) >= 16:
+                            self._nearest_object_obstacles = []
+                        self._nearest_object_obstacles.append(click)
+                        logger.info(f'[大世界-雷达] 点击 {click} 舰队未移动，'
+                                    f'标记为障碍格，改走侧翼')
+                if self._nearest_object_stuck_count >= self.NEAREST_OBJECT_ABANDON_STUCK:
+                    # 兜底：镜头恢复过、障碍也标了仍持续卡死，放弃目标换下一个
+                    self._abandon_nearest_object(target)
                     self._nearest_object_click_timer.reset()
                     return False
         self._nearest_object_last_homo = tuple(homo) if homo is not None else None
+        self._nearest_object_last_signature = signature
 
         step = 1 if self.appear(FLEET_EMP_DEBUFF, offset=(50, 20)) else 3
         nearest = self.fleet_walk_limit(nearest.location, step=step)
+
+        # 障碍过滤：方向格/目标格已被标记为障碍(岛屿/路径被挡)时，
+        # 改走侧翼格——从 8 个方向格中取与目标方向最接近且非障碍的一个，
+        # 绕过地形后再重新朝目标走。8 个方向全被堵则放弃目标。
+        click = tuple(int(x) for x in nearest)
+        if click in self._nearest_object_obstacles:
+            sidestep = self._sidestep_toward(target, step=step)
+            if sidestep is None:
+                logger.info(f'[大世界-雷达] 目标 {target} 各方向均被障碍封死，放弃该目标')
+                self._abandon_nearest_object(target)
+                self._nearest_object_click_timer.reset()
+                return False
+            logger.info(f'[大世界-雷达] {click} 为障碍格，侧翼绕行 {sidestep}')
+            click = sidestep
+        self._nearest_object_last_click = click
+
         try:
-            nearest = self.convert_radar_to_local(nearest)
+            nearest = self.convert_radar_to_local(click)
         except KeyError:
-            logger.info('[大世界-雷达] 雷达格子不在本地地图上')
+            # 该格不在本地视野内无法点击，标记为障碍，下轮换方向
+            if click not in self._nearest_object_obstacles:
+                self._nearest_object_obstacles.append(click)
+            logger.info(f'[大世界-雷达] {click} 不在视野内，标记为障碍，下轮换方向')
             self._nearest_object_click_timer.reset()
             return False
         self.device.click(nearest)
         self._nearest_object_click_timer.reset()
+        return True
+
+    def _nearest_object_radar_signature(self):
+        """雷达实体布局指纹：所有目标格坐标的集合。
+
+        雷达以舰队为原点，舰队移动后所有目标坐标整体平移、指纹必变；
+        舰队不动且目标静止时指纹不变。用于"点击后舰队是否移动"判定。
+        """
+        return frozenset(
+            tuple(int(v) for v in grid.location)
+            for grid in self.radar
+            if grid.is_enemy or grid.is_resource or grid.is_meowfficer
+            or grid.is_exclamation or grid.is_question or grid.is_archive
+            or grid.is_port
+        )
+
+    def _abandon_nearest_object(self, target):
+        """放弃当前目标：拉黑其截断格让 nearest_object 跳过，重置绕行状态。
+
+        Args:
+            target (tuple): 目标的视野截断格(雷达坐标系)。
+        """
+        logger.info(f'[大世界-雷达] 放弃目标 {target}，切换下一个')
+        if target not in self._nearest_object_abandoned:
+            if len(self._nearest_object_abandoned) >= 4:
+                self._nearest_object_abandoned = []
+            self._nearest_object_abandoned.append(target)
+        self._nearest_object_stuck_count = 0
+        self._nearest_object_last_focus_stuck = 0
+        self._nearest_object_detour_steps = 0
+        self._nearest_object_obstacles = []
+
+    def _sidestep_toward(self, target, step):
+        """目标方向被障碍堵住时，从作者方向格集合中选一个绕行格。
+
+        按与目标方向的点积降序排列(优先最贴近目标方向)，跳过已知障碍格
+        与超出本地视野的格(本地视野 10x7、舰队位于 (5,4)，雷达格
+        x∈[-5,4]、y∈[-4,2] 才能转换点击)。返回第一个可用的雷达格；
+        全部不可用返回 None(调用方放弃目标)。
+
+        Args:
+            target (tuple): 目标的视野截断格(雷达坐标系)。
+            step (int): 移动力步长，1(EMP 状态)或 3。
+
+        Returns:
+            tuple or None: 侧翼绕行的雷达格。
+        """
+        if step == 1:
+            # 与作者 fleet_walk_limit 的方向格集合一致：EMP 状态一步只有
+            # 4 个正方向可走，对角格点了也不会动
+            sidesteps = [
+                (0, -1), (0, 1), (-1, 0), (1, 0),
+            ]
+        else:
+            sidesteps = [
+                (0, -3), (0, 3), (-3, 0), (3, 0),
+                (2, -2), (2, 2), (-2, 2), (-2, -2),
+            ]
+        target_vec = np.array(target, dtype=float)
+        norm = np.linalg.norm(target_vec)
+        if norm < 1e-6:
+            target_vec = np.array([1.0, 0.0])
+            norm = 1.0
+
+        def direction_score(grid):
+            vec = np.array(grid, dtype=float)
+            return np.dot(vec, target_vec) / (np.linalg.norm(vec) * norm)
+
+        for grid in sorted(sidesteps, key=direction_score, reverse=True):
+            if grid in self._nearest_object_obstacles:
+                continue
+            # 超出本地视野的格无法点击(舰队(5,4)、视野 x0-9/y0-6)
+            if not (-5 <= grid[0] <= 4 and -4 <= grid[1] <= 2):
+                continue
+            return grid
+        return None
