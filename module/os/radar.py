@@ -419,12 +419,14 @@ class Radar:
 
         return None
 
-    def nearest_object(self, camera_sight=(-4, -3, 3, 3), exclude=None):
+    def nearest_object(self, camera_sight=(-4, -3, 3, 3), exclude=None, raw=False):
         """
         Args:
             camera_sight:
             exclude (list[tuple]): 被放弃目标的截断格（8 邻域已判定不可达）列表，
                 跳过这些格子，让雷达切换下一个目标。
+            raw (bool): True 时返回最近目标的原始坐标（不受 camera_sight 截断），
+                用于分步接近远距离目标。默认 False，保持截断语义不变。
 
         Returns:
             RadarGrid: Or None if no objects
@@ -445,6 +447,10 @@ class Radar:
             limited = point_limit(nearest.location, area=camera_sight)
             if tuple(limited) in exclude:
                 continue
+            if raw:
+                # 分步接近用：返回真正的最近目标（含镜头外的远目标），
+                # 调用方据此计算步骤方向逐步靠近。
+                return nearest
             if nearest.location == limited:
                 return nearest
             else:

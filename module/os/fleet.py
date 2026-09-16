@@ -1219,6 +1219,12 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         if clicked is not None:
             return clicked
 
+        # 候选(9 格)都已不可达/不在视野，通常目标在镜头外(雷达能看到但镜内够不着)。
+        # 先朝目标方向(原始坐标)在镜内走 1 步，镜头刷新后再循环逐步靠近；
+        # 若这一步也走不出去，再落回目标级放弃/侧翼绕行，避免静默不行动。
+        if self._step_toward_object():
+            return True
+
         # 所有候选(9 格)都不可达(已封锁或不在本地视野)：目标级放弃，切换下一个
         limited = self._normalize_coord(point_limit(nearest.location, area=(-4, -3, 3, 3)))
         if tuple(limited) not in self._nearest_object_blocked_objects:
@@ -1256,6 +1262,54 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
     def _normalize_coord(loc):
         """将 numpy/int 元组统一转为纯 int 元组，保证封锁/放弃匹配稳定。"""
         return tuple(int(x) for x in loc)
+
+    def _step_toward_object(self):
+        """朝雷达上最近的远距离目标方向，在镜头内走一步。
+
+        用于目标在镜头外、候选(9格)全部不可达时的分步接近：
+        取目标的原始坐标(不受 camera_sight 截断)算方向，在舰队周围的
+        可点击邻格中选最朝目标方向的一格走 1 步，镜头跟随舰队刷新后再
+        循环靠近。失败(无可走格)返回 False，交由上层落回放弃/绕行。
+
+        方向计算与候选格均使用雷达坐标系(舰队位于雷达中心 (0,0))。
+        """
+        target = self.radar.nearest_object(exclude=self._nearest_object_blocked_objects, raw=True)
+        if target is None:
+            return False
+        target = self._normalize_coord(target.location)
+        if target == (0, 0):
+            return False
+
+        direction = np.array(target, dtype=float)
+        # 围绕舰队(雷达中心)的邻近格(1 步可到)，按相对舰队方向与目标方向最一致者优先
+        neighbors = [(0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]
+        candidates = []
+        for neighbor in neighbors:
+            if neighbor not in self.radar or self._normalize_coord(neighbor) in self._nearest_object_blocked:
+                continue
+            vec = np.array(neighbor, dtype=float)
+            # 朝目标方向(点积)优先
+            score = float(np.dot(vec, direction) / (np.linalg.norm(direction) or 1.0))
+            candidates.append((score, neighbor))
+        if not candidates:
+            return False
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _, candidate in candidates:
+            try:
+                local = self.convert_radar_to_local(candidate)
+            except KeyError:
+                continue
+            local_area = local.button
+            goto_globe_areas = (MAP_GOTO_GLOBE.area, MAP_GOTO_GLOBE_FOG.area)
+            if any(area_cross_area(local_area, globe_area) for globe_area in goto_globe_areas):
+                continue
+            logger.info(f'[大世界-雷达] 目标 {target} 在镜头外，朝其方向推进一格 {candidate}')
+            self._nearest_object_last_click = candidate
+            self._nearest_object_last_fleet = (0, 0)
+            self.device.click(local)
+            self._nearest_object_click_timer.reset()
+            return True
+        return False
 
     def _click_first_available(self, candidates, current_fleet):
         """依次点击候选格中可转换为本地坐标的最近一格。返回是否执行点击。"""
