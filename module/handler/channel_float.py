@@ -23,9 +23,11 @@ from module.ui.page import page_main_white
 CHANNEL_FLOAT_AREA = (0, 0, 640, 50)
 # 绿色像素计数阈值：实测有球 443、无球 0，取 20 作为安全阈值
 CHANNEL_FLOAT_GREEN_THRESHOLD = 20
-# 悬浮球拖拽起点（悬浮球中心）与终点（屏幕中下）
+# 悬浮球拖拽起点（悬浮球中心）与终点（屏幕中下偏下）：
+# 「隐藏悬浮球」对话框的触发区域位于屏幕下方，实测终点需压到
+# y=660 附近才能稳定触发（620 偏高，松手后悬浮球弹回原位）
 CHANNEL_FLOAT_SWIPE_START = (220, 45)
-CHANNEL_FLOAT_SWIPE_END = (640, 620)
+CHANNEL_FLOAT_SWIPE_END = (640, 660)
 # 拖到终点后按住停留时长：悬浮球需停留片刻再松手才会触发「隐藏悬浮球」
 # 对话框，立即松手会被判定为甩动；drag 后端另有约 0.28s 的内置停顿
 CHANNEL_FLOAT_HOLD_DURATION = 0.2

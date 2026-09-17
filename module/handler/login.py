@@ -32,7 +32,9 @@ _ = get_distribution
 import module.config.server as server
 from module.base.button import Button
 from module.handler.channel_float import (
-    CHANNEL_FLOAT_AREA, detect_channel_float, dialog_button_brightness,
+    CHANNEL_FLOAT_AREA, CHANNEL_FLOAT_SWIPE_START, CHANNEL_FLOAT_SWIPE_END,
+    CHANNEL_FLOAT_HOLD_DURATION, CHANNEL_FLOAT_HIDE_BUTTON, CHANNEL_FLOAT_MAX_ATTEMPTS,
+    detect_channel_float, dialog_button_brightness,
 )
 from module.base.timer import Timer
 from module.base.utils import color_similarity_2d, crop
@@ -61,22 +63,8 @@ RESTART_OBSERVE_INTERVAL = 15
 # （依赖 screenshot() 中的 stuck_record_check）均无法触发的死锁。
 RESTART_OPERATION_TIMEOUT = 120
 
-# 4399 等渠道服客户端启动后，屏幕左上角（角色名右侧）会出现 SDK 悬浮球，
-# 需要将悬浮球拖拽到屏幕中下方，随后在弹出的「隐藏悬浮球」对话框中
-# 点击「隐藏」按钮才能消除；坐标为 1280x720 分辨率下的屏幕坐标。
-CHANNEL_FLOAT_SWIPE_START = (220, 45)
-CHANNEL_FLOAT_SWIPE_END = (640, 620)
-# 拖到终点后按住停留时长：悬浮球需停留片刻再松手才会触发「隐藏悬浮球」
-# 对话框，立即松手会被判定为甩动；drag 后端另有约 0.28s 的内置停顿
-CHANNEL_FLOAT_HOLD_DURATION = 0.2
-CHANNEL_FLOAT_MAX_ATTEMPTS = 4
-# 「隐藏悬浮球」对话框中的「隐藏」按钮
-CHANNEL_FLOAT_HIDE_BUTTON = Button(
-    area=(728, 604, 848, 664),
-    color=(),
-    button=(728, 604, 848, 664),
-    name='CHANNEL_FLOAT_HIDE_BUTTON',
-)
+# 4399 渠道服悬浮球处理的坐标与常量统一定义在 module/handler/channel_float.py，
+# 此处仅导入使用（见文件头部 import），避免两处定义不同步。
 
 
 class LoginHandler(UI):
