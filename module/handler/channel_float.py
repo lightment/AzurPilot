@@ -11,7 +11,7 @@ import numpy as np
 
 from module.base.base import ModuleBase
 from module.base.button import Button
-from module.base.utils import crop, get_color
+from module.base.utils import crop
 from module.base.timer import Timer
 from module.config.deep import deep_get
 from module.handler.assets import LOGIN_CHECK
@@ -32,13 +32,18 @@ CHANNEL_FLOAT_SWIPE_END = (640, 660)
 # 对话框，立即松手会被判定为甩动；drag 后端另有约 0.28s 的内置停顿
 CHANNEL_FLOAT_HOLD_DURATION = 0.2
 CHANNEL_FLOAT_MAX_ATTEMPTS = 4
-# 「隐藏悬浮球」对话框中的「隐藏」按钮
+# 「隐藏悬浮球」对话框中的「隐藏」按钮：
+# 实测标定(2026-09-17 截图)：对话框白色主体在游戏 y=120~599，「隐藏」
+# 绿色文字位于 (734~778, 552~573) 中心 (756,562)，按钮热区四周放宽；
+# 此前定义 (728,604,848,664) 中心偏下约 72px 落在对话框外，点击无效
 CHANNEL_FLOAT_HIDE_BUTTON = Button(
-    area=(728, 604, 848, 664),
+    area=(700, 535, 800, 590),
     color=(),
-    button=(728, 604, 848, 664),
+    button=(700, 535, 800, 590),
     name='CHANNEL_FLOAT_HIDE_BUTTON',
 )
+# 「隐藏」按钮绿色文字像素数阈值：实测有按钮 334、主界面同位置干扰 0
+CHANNEL_FLOAT_HIDE_GREEN_THRESHOLD = 30
 
 
 def detect_channel_float(image) -> bool:
@@ -58,17 +63,25 @@ def detect_channel_float(image) -> bool:
     return green >= CHANNEL_FLOAT_GREEN_THRESHOLD
 
 
-def dialog_button_brightness(image) -> float:
-    """「隐藏」按钮区域的平均亮度，用于判断「隐藏悬浮球」对话框是否弹出。
+def hide_button_visible(image) -> bool:
+    """「隐藏悬浮球」对话框的「隐藏」按钮是否可见。
+
+    「隐藏」按钮文字为绿色，对话框白底上极易检出；此前用按钮区域
+    平均亮度判断对话框弹出，但该区域落在对话框外，主界面背景亮度
+    不稳定导致误判。改为统计按钮区域绿色文字像素数。
 
     Args:
         image: 当前截图（1280x720）。
 
     Returns:
-        float: 区域平均亮度（0~255）。
+        bool: True 表示「隐藏」按钮可见（可安全点击）。
     """
-    color = get_color(image, (728, 604, 848, 664))
-    return float(sum(color) / len(color))
+    area_img = crop(image, CHANNEL_FLOAT_HIDE_BUTTON.area, copy=False)
+    r = area_img[:, :, 0].astype(np.int16)
+    g = area_img[:, :, 1].astype(np.int16)
+    b = area_img[:, :, 2].astype(np.int16)
+    green = int(np.sum((g > r + 40) & (g > b + 40) & (g > 100)))
+    return green >= CHANNEL_FLOAT_HIDE_GREEN_THRESHOLD
 
 
 class ChannelFloatHandler(ModuleBase):
@@ -106,18 +119,6 @@ class ChannelFloatHandler(ModuleBase):
         image = crop(self.device.image, CHANNEL_FLOAT_AREA, copy=False)
         return detect_channel_float(image)
 
-    def _dialog_brightness(self) -> float:
-        """「隐藏」按钮区域的平均亮度。
-
-        对话框出现时「隐藏」按钮区域为浅色底（接近白色），
-        游戏画面中该区域为深色画面，通过平均亮度即可区分。
-
-        Returns:
-            float: 区域平均亮度（0~255），供日志记录。
-        """
-        color = get_color(self.device.image, (728, 604, 848, 664))
-        return float(sum(color) / len(color))
-
     def handle_channel_float(self) -> bool:
         """拖拽悬浮球到屏幕中下，并在「隐藏」对话框弹出后点击「隐藏」。
 
@@ -133,19 +134,16 @@ class ChannelFloatHandler(ModuleBase):
             point_random=(0, 0, 0, 0), hold_duration=CHANNEL_FLOAT_HOLD_DURATION,
             name='CHANNEL_FLOAT_DRAG')
         logger.info(f'[渠道悬浮球] 拖拽完成，耗时 {time.monotonic() - start:.2f}s')
-        # 等待「隐藏悬浮球」对话框弹出（截图循环，最多等 4 秒）
+        # 等待「隐藏」按钮出现（截图循环，最多等 4 秒）
         dialog_timer = Timer(4).start()
-        last_brightness = 0.0
         while 1:
             self.device.screenshot()
-            last_brightness = self._dialog_brightness()
-            if last_brightness > 150:
-                logger.info(f'[渠道悬浮球] 点击「隐藏」（按钮区域亮度 {last_brightness:.0f}）')
+            if hide_button_visible(self.device.image):
+                logger.info('[渠道悬浮球] 检测到「隐藏」按钮，点击')
                 self.device.click(CHANNEL_FLOAT_HIDE_BUTTON)
                 break
             if dialog_timer.reached():
-                logger.info(
-                    f'[渠道悬浮球] 未见「隐藏悬浮球」对话框（最后亮度 {last_brightness:.0f}），跳过点击')
+                logger.info('[渠道悬浮球] 未见「隐藏」按钮，跳过点击')
                 break
         return True
 

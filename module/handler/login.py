@@ -34,7 +34,7 @@ from module.base.button import Button
 from module.handler.channel_float import (
     CHANNEL_FLOAT_AREA, CHANNEL_FLOAT_SWIPE_START, CHANNEL_FLOAT_SWIPE_END,
     CHANNEL_FLOAT_HOLD_DURATION, CHANNEL_FLOAT_HIDE_BUTTON, CHANNEL_FLOAT_MAX_ATTEMPTS,
-    detect_channel_float, dialog_button_brightness,
+    detect_channel_float, hide_button_visible,
 )
 from module.base.timer import Timer
 from module.base.utils import color_similarity_2d, crop
@@ -256,13 +256,13 @@ class LoginHandler(UI):
         """「隐藏悬浮球」对话框可见时点击「隐藏」按钮。
 
         悬浮球被拖拽到屏幕中下后会弹出「隐藏悬浮球」对话框；
-        仅在检测到对话框（按钮区域浅色底）时才点击，
-        对话框不可见时返回 False，等待下一轮截图再试。
+        通过按钮区域绿色文字检出对话框（「隐藏」二字为绿色），
+        不可见时返回 False，等待下一轮截图再试。
 
         Returns:
-            bool: True 表示已点击隐藏；False 表示对话框暂不可见。
+            bool: True 表示已点击隐藏；False 表示按钮暂不可见。
         """
-        if dialog_button_brightness(self.device.image) <= 150:
+        if not hide_button_visible(self.device.image):
             return False
         logger.info('[登录] 点击隐藏悬浮球')
         self.device.click(CHANNEL_FLOAT_HIDE_BUTTON)
