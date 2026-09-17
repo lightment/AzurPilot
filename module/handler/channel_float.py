@@ -26,7 +26,9 @@ CHANNEL_FLOAT_GREEN_THRESHOLD = 20
 # 悬浮球拖拽起点（悬浮球中心）与终点（屏幕中下）
 CHANNEL_FLOAT_SWIPE_START = (220, 45)
 CHANNEL_FLOAT_SWIPE_END = (640, 620)
-CHANNEL_FLOAT_SWIPE_DURATION = 0.6
+# 拖到终点后按住停留时长：悬浮球需停留片刻再松手才会触发「隐藏悬浮球」
+# 对话框，立即松手会被判定为甩动；drag 后端另有约 0.28s 的内置停顿
+CHANNEL_FLOAT_HOLD_DURATION = 0.2
 CHANNEL_FLOAT_MAX_ATTEMPTS = 4
 # 「隐藏悬浮球」对话框中的「隐藏」按钮
 CHANNEL_FLOAT_HIDE_BUTTON = Button(
@@ -122,11 +124,12 @@ class ChannelFloatHandler(ModuleBase):
         """
         logger.info(
             f'[渠道悬浮球] 拖拽 {CHANNEL_FLOAT_SWIPE_START} -> {CHANNEL_FLOAT_SWIPE_END}, '
-            f'{CHANNEL_FLOAT_SWIPE_DURATION}s')
+            f'终点停留 {CHANNEL_FLOAT_HOLD_DURATION}s')
         start = time.monotonic()
-        self.device.swipe(
+        self.device.drag(
             CHANNEL_FLOAT_SWIPE_START, CHANNEL_FLOAT_SWIPE_END,
-            duration=CHANNEL_FLOAT_SWIPE_DURATION, name='CHANNEL_FLOAT_SWIPE')
+            point_random=(0, 0, 0, 0), hold_duration=CHANNEL_FLOAT_HOLD_DURATION,
+            name='CHANNEL_FLOAT_DRAG')
         logger.info(f'[渠道悬浮球] 拖拽完成，耗时 {time.monotonic() - start:.2f}s')
         # 等待「隐藏悬浮球」对话框弹出（截图循环，最多等 4 秒）
         dialog_timer = Timer(4).start()

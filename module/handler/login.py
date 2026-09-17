@@ -66,7 +66,9 @@ RESTART_OPERATION_TIMEOUT = 120
 # 点击「隐藏」按钮才能消除；坐标为 1280x720 分辨率下的屏幕坐标。
 CHANNEL_FLOAT_SWIPE_START = (220, 45)
 CHANNEL_FLOAT_SWIPE_END = (640, 620)
-CHANNEL_FLOAT_SWIPE_DURATION = 0.6
+# 拖到终点后按住停留时长：悬浮球需停留片刻再松手才会触发「隐藏悬浮球」
+# 对话框，立即松手会被判定为甩动；drag 后端另有约 0.28s 的内置停顿
+CHANNEL_FLOAT_HOLD_DURATION = 0.2
 CHANNEL_FLOAT_MAX_ATTEMPTS = 4
 # 「隐藏悬浮球」对话框中的「隐藏」按钮
 CHANNEL_FLOAT_HIDE_BUTTON = Button(
@@ -256,9 +258,10 @@ class LoginHandler(UI):
             logger.info('[登录] 未识别到渠道服悬浮球，跳过拖拽')
             return False
         logger.info('[登录] 拖动渠道服悬浮球至屏幕中下')
-        self.device.swipe(
+        self.device.drag(
             CHANNEL_FLOAT_SWIPE_START, CHANNEL_FLOAT_SWIPE_END,
-            duration=CHANNEL_FLOAT_SWIPE_DURATION, name='CHANNEL_FLOAT_SWIPE')
+            point_random=(0, 0, 0, 0), hold_duration=CHANNEL_FLOAT_HOLD_DURATION,
+            name='CHANNEL_FLOAT_DRAG')
         return True
 
     def handle_channel_float_hide(self) -> bool:
