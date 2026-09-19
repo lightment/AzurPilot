@@ -32,9 +32,8 @@ _ = get_distribution
 import module.config.server as server
 from module.base.button import Button
 from module.handler.channel_float import (
-    CHANNEL_FLOAT_SWIPE_END,
-    CHANNEL_FLOAT_HOLD_DURATION, CHANNEL_FLOAT_HIDE_BUTTON, CHANNEL_FLOAT_MAX_ATTEMPTS,
-    channel_float_position, hide_button_visible,
+    CHANNEL_FLOAT_SWIPE_END, CHANNEL_FLOAT_HOLD_DURATION, CHANNEL_FLOAT_MAX_ATTEMPTS,
+    channel_float_position, hide_button,
 )
 from module.base.timer import Timer
 from module.base.utils import color_similarity_2d, crop
@@ -245,9 +244,12 @@ class LoginHandler(UI):
         if ball_pos is None:
             logger.info('[登录] 未识别到渠道服悬浮球，跳过拖拽')
             return False
+        height, width = self.device.image.shape[:2]
+        swipe_end = (int(CHANNEL_FLOAT_SWIPE_END[0] * width / 1280),
+                     int(CHANNEL_FLOAT_SWIPE_END[1] * height / 720))
         logger.info(f'[登录] 拖动渠道服悬浮球 {ball_pos} 至屏幕中下')
         self.device.drag(
-            ball_pos, CHANNEL_FLOAT_SWIPE_END,
+            ball_pos, swipe_end,
             point_random=(0, 0, 0, 0), hold_duration=CHANNEL_FLOAT_HOLD_DURATION,
             name='CHANNEL_FLOAT_DRAG')
         return True
@@ -256,16 +258,17 @@ class LoginHandler(UI):
         """「隐藏悬浮球」对话框可见时点击「隐藏」按钮。
 
         悬浮球被拖拽到屏幕中下后会弹出「隐藏悬浮球」对话框；
-        通过按钮区域绿色文字检出对话框（「隐藏」二字为绿色），
-        不可见时返回 False，等待下一轮截图再试。
+        通过白色对话框+区内底部绿字动态定位「隐藏」按钮（位置随
+        分辨率变化），不可见时返回 False，等待下一轮截图再试。
 
         Returns:
             bool: True 表示已点击隐藏；False 表示按钮暂不可见。
         """
-        if not hide_button_visible(self.device.image):
+        button = hide_button(self.device.image)
+        if button is None:
             return False
         logger.info('[登录] 点击隐藏悬浮球')
-        self.device.click(CHANNEL_FLOAT_HIDE_BUTTON)
+        self.device.click(button)
         return True
 
     def _login_wait_timeout(self):
