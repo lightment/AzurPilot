@@ -32,9 +32,9 @@ _ = get_distribution
 import module.config.server as server
 from module.base.button import Button
 from module.handler.channel_float import (
-    CHANNEL_FLOAT_AREA, CHANNEL_FLOAT_SWIPE_START, CHANNEL_FLOAT_SWIPE_END,
+    CHANNEL_FLOAT_SWIPE_END,
     CHANNEL_FLOAT_HOLD_DURATION, CHANNEL_FLOAT_HIDE_BUTTON, CHANNEL_FLOAT_MAX_ATTEMPTS,
-    detect_channel_float, hide_button_visible,
+    channel_float_position, hide_button_visible,
 )
 from module.base.timer import Timer
 from module.base.utils import color_similarity_2d, crop
@@ -235,19 +235,19 @@ class LoginHandler(UI):
     def handle_channel_float(self) -> bool:
         """识别到悬浮球时将其拖拽到屏幕中下方。
 
-        仅在绿色标志检测到悬浮球时才执行拖拽；未识别到返回 False，
-        不产生任何输入操作，避免干扰登录界面控件。
+        通过绿色标志动态定位悬浮球中心（停靠位置每次启动不固定），
+        未识别到返回 False，不产生任何输入操作，避免干扰登录界面控件。
 
         Returns:
             bool: True 表示已执行拖拽操作；False 表示未识别到悬浮球。
         """
-        image = crop(self.device.image, CHANNEL_FLOAT_AREA, copy=False)
-        if not detect_channel_float(image):
+        ball_pos = channel_float_position(self.device.image)
+        if ball_pos is None:
             logger.info('[登录] 未识别到渠道服悬浮球，跳过拖拽')
             return False
-        logger.info('[登录] 拖动渠道服悬浮球至屏幕中下')
+        logger.info(f'[登录] 拖动渠道服悬浮球 {ball_pos} 至屏幕中下')
         self.device.drag(
-            CHANNEL_FLOAT_SWIPE_START, CHANNEL_FLOAT_SWIPE_END,
+            ball_pos, CHANNEL_FLOAT_SWIPE_END,
             point_random=(0, 0, 0, 0), hold_duration=CHANNEL_FLOAT_HOLD_DURATION,
             name='CHANNEL_FLOAT_DRAG')
         return True

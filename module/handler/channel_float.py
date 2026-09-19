@@ -1,9 +1,9 @@
 """渠道服（4399）启动悬浮球处理。
 
-4399 等渠道服客户端启动后，屏幕左上角（角色名右上方）会出现 SDK 悬浮球。
-悬浮球是半透明圆盘，截图里几乎不可见，但顶部带有一圈绿色「○○○」标志，
-而黑色标题栏背景不含绿色，因此通过统计绿标像素即可可靠检出。
-检出后自动将悬浮球拖拽到屏幕中下，并点击「隐藏悬浮球」对话框的「隐藏」按钮。
+4399 等渠道服客户端启动后，屏幕顶部会出现 SDK 悬浮球（半透明圆盘，
+直径约 70px，截图里几乎不可见），顶部带绿色「○○○」标志（三个小圆点）。
+悬浮球每次启动停靠位置不固定，通过绿标动态定位球中心后拖拽到屏幕
+中下触发「隐藏悬浮球」对话框，并点击「隐藏」按钮将其彻底关闭。
 """
 import time
 
@@ -18,15 +18,22 @@ from module.handler.assets import LOGIN_CHECK
 from module.logger import logger
 from module.ui.page import page_main_white
 
-# 悬浮球识别区域：主页面左上角上边沿左半范围（1280x720），
-# 绿色「○○○」标志为识别特征；悬浮球需位于等级与名字中间（见 GUI 说明）
-CHANNEL_FLOAT_AREA = (0, 0, 640, 50)
-# 绿色像素计数阈值：实测有球 443、无球 0，取 20 作为安全阈值
+# 悬浮球识别区域：主页面左上角范围（1280x720）。
+# SDK 悬浮球停靠在屏幕顶部一带，顶部带绿色「○○○」标志（三个小圆点横排）。
+# 悬浮球每次启动停靠位置不固定（实测出现过绿标位于 (299~349,0~9) 与
+# (220,45) 附近两种），因此采用动态定位而非硬编码坐标。
+CHANNEL_FLOAT_AREA = (0, 0, 640, 100)
+# 排除区域：游戏头像框旁的绿色箭头（原生UI，约 (85~120, 60~90)），
+# 颜色特征与悬浮球绿标相同，需显式排除避免误定位
+CHANNEL_FLOAT_EXCLUDE_AREA = (80, 55, 125, 95)
+# 绿色像素计数阈值：实测有球约330、无球0，取 20 作为安全阈值
 CHANNEL_FLOAT_GREEN_THRESHOLD = 20
-# 悬浮球拖拽起点（悬浮球中心）与终点（屏幕中下偏下）：
+# 绿标中心到球中心的垂直偏移：球直径约70px，绿标位于球顶部，
+# 实测绿标中心(324,4)对应球心(324,35)，偏移约+31px
+CHANNEL_FLOAT_BALL_CENTER_OFFSET_Y = 30
+# 悬浮球拖拽终点（屏幕中下偏下）：
 # 「隐藏悬浮球」对话框的触发区域位于屏幕下方，实测终点需压到
 # y=680 附近才能稳定触发（660 仍偏浅，松手后悬浮球弹回原位）
-CHANNEL_FLOAT_SWIPE_START = (220, 45)
 CHANNEL_FLOAT_SWIPE_END = (640, 680)
 # 拖到终点后按住停留时长：悬浮球需停留片刻再松手才会触发「隐藏悬浮球」
 # 对话框，立即松手会被判定为甩动；drag 后端另有约 0.28s 的内置停顿
@@ -46,21 +53,41 @@ CHANNEL_FLOAT_HIDE_BUTTON = Button(
 CHANNEL_FLOAT_HIDE_GREEN_THRESHOLD = 30
 
 
-def detect_channel_float(image) -> bool:
-    """检测悬浮球：统计绿色「○○○」标志像素。
+def channel_float_position(image):
+    """定位悬浮球：返回球中心坐标，未识别到返回 None。
+
+    悬浮球半透明难以直接识别，但其顶部带有绿色「○○○」标志。
+    在左上识别区内统计绿色像素并排除头像框旁绿色箭头（原生UI），
+    绿色质心即绿标中心，向下偏移约 30px 为球中心。悬浮球每次启动
+    停靠位置不固定，动态定位取代硬编码拖拽起点。
 
     Args:
         image: 当前截图（1280x720）。
 
     Returns:
-        bool: True 表示识别到悬浮球。
+        tuple: 球中心坐标 (x, y)；未识别到时 None。
     """
-    r = image[:, :, 0].astype(np.int16)
-    g = image[:, :, 1].astype(np.int16)
-    b = image[:, :, 2].astype(np.int16)
-    green = int(np.sum((g > r + 15) & (g > b + 15) & (g > 100)))
-    logger.info(f'[渠道悬浮球] 绿色标志像素 {green}')
-    return green >= CHANNEL_FLOAT_GREEN_THRESHOLD
+    area = CHANNEL_FLOAT_AREA
+    area_img = crop(image, area, copy=False)
+    r = area_img[:, :, 0].astype(np.int16)
+    g = area_img[:, :, 1].astype(np.int16)
+    b = area_img[:, :, 2].astype(np.int16)
+    green = (g > r + 15) & (g > b + 15) & (g > 100)
+    ex = CHANNEL_FLOAT_EXCLUDE_AREA
+    x0 = max(ex[0] - area[0], 0)
+    y0 = max(ex[1] - area[1], 0)
+    x1 = min(ex[2] - area[0], green.shape[1])
+    y1 = min(ex[3] - area[1], green.shape[0])
+    green[y0:y1, x0:x1] = False
+    count = int(green.sum())
+    if count < CHANNEL_FLOAT_GREEN_THRESHOLD:
+        logger.info(f'[渠道悬浮球] 绿色标志像素 {count}，未识别到悬浮球')
+        return None
+    ys, xs = np.where(green)
+    cx = int(xs.mean()) + area[0]
+    cy = int(ys.mean()) + area[1] + CHANNEL_FLOAT_BALL_CENTER_OFFSET_Y
+    logger.info(f'[渠道悬浮球] 绿色标志像素 {count}，定位球中心 ({cx}, {cy})')
+    return (cx, cy)
 
 
 def hide_button_visible(image) -> bool:
@@ -107,30 +134,21 @@ class ChannelFloatHandler(ModuleBase):
         logger.info(f'[渠道悬浮球] 未启用：非 4399 渠道服（server={server_name}, package={package}）')
         return False
 
-    def detected(self) -> bool:
-        """悬浮球是否出现在屏幕左上角黑条区域。
-
-        悬浮球半透明难以直接模板识别，但其顶部带有绿色「○○○」标志，
-        黑色标题栏背景不含绿色像素，通过统计绿色像素数量即可可靠检出。
-
-        Returns:
-            bool: True 表示识别到悬浮球。
-        """
-        image = crop(self.device.image, CHANNEL_FLOAT_AREA, copy=False)
-        return detect_channel_float(image)
-
-    def handle_channel_float(self) -> bool:
+    def handle_channel_float(self, ball_pos) -> bool:
         """拖拽悬浮球到屏幕中下，并在「隐藏」对话框弹出后点击「隐藏」。
+
+        Args:
+            ball_pos: 悬浮球中心坐标 (x, y)，由 channel_float_position 动态定位。
 
         Returns:
             bool: 固定返回 True，表示已执行处理。
         """
         logger.info(
-            f'[渠道悬浮球] 拖拽 {CHANNEL_FLOAT_SWIPE_START} -> {CHANNEL_FLOAT_SWIPE_END}, '
+            f'[渠道悬浮球] 拖拽 {ball_pos} -> {CHANNEL_FLOAT_SWIPE_END}, '
             f'终点停留 {CHANNEL_FLOAT_HOLD_DURATION}s')
         start = time.monotonic()
         self.device.drag(
-            CHANNEL_FLOAT_SWIPE_START, CHANNEL_FLOAT_SWIPE_END,
+            ball_pos, CHANNEL_FLOAT_SWIPE_END,
             point_random=(0, 0, 0, 0), hold_duration=CHANNEL_FLOAT_HOLD_DURATION,
             name='CHANNEL_FLOAT_DRAG')
         logger.info(f'[渠道悬浮球] 拖拽完成，耗时 {time.monotonic() - start:.2f}s')
@@ -179,10 +197,10 @@ class ChannelFloatHandler(ModuleBase):
                 logger.info('[渠道悬浮球] 等待主界面超时，跳过本会话')
                 return True
         logger.attr('检测区域', CHANNEL_FLOAT_AREA)
-        logger.attr('绿色阈值', CHANNEL_FLOAT_GREEN_THRESHOLD)
         for attempt in range(CHANNEL_FLOAT_MAX_ATTEMPTS):
             self.device.screenshot()
-            if not self.detected():
+            ball_pos = channel_float_position(self.device.image)
+            if ball_pos is None:
                 logger.info(
                     f'[渠道悬浮球] 第 {attempt + 1}/{CHANNEL_FLOAT_MAX_ATTEMPTS} 次：'
                     '未识别到悬浮球，跳过')
@@ -190,6 +208,6 @@ class ChannelFloatHandler(ModuleBase):
             logger.info(
                 f'[渠道悬浮球] 第 {attempt + 1}/{CHANNEL_FLOAT_MAX_ATTEMPTS} 次：'
                 '识别到悬浮球，开始处理')
-            self.handle_channel_float()
+            self.handle_channel_float(ball_pos)
         logger.info('[渠道悬浮球] 多次处理仍未消失，跳过本回合')
         return True
