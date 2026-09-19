@@ -387,26 +387,26 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         """
         logger.hr('等待摄像机稳定')
         record = None
-        jump_count = 0
+        # 卡死兜底：正常镜头恢复 3~5 秒内完成；深渊海域等场景瓦片匹配
+        # 周期性失败，homo_loca 在正确值与错误值间交替振荡，稳定确认窗
+        # 永远被打断，循环会卡死至 GameStuckError。连续 150 轮(~50 秒)
+        # 未确认稳定视为画面检测异常，跳出由外层循环重新截图决策（点击
+        # 会促使镜头重新对齐恢复，与手动干预同原理）。
+        stall_count = 0
         confirm_timer = Timer(0.6, count=2).start()
         for _ in self.loop(skip_first=skip_first_screenshot):
             self.update_os()
             current = self.view.backend.homo_loca
             logger.attr('单应位置', current)
+            stall_count += 1
             if record is None or (current is not None and np.linalg.norm(np.subtract(current, record)) < 3):
-                jump_count = 0
                 if confirm_timer.reached():
                     break
             else:
                 confirm_timer.reset()
-                # 深渊海域等场景瓦片匹配持续失败，homo_loca 在多个错误
-                # 位置间震荡，稳定条件永远无法满足。连续跳变视为画面
-                # 检测异常，跳出等待由外层循环重新截图决策。
-                jump_count += 1
-                if jump_count >= 15:
-                    logger.warning(f'[大世界-摄像机] homo_loca 连续 {jump_count} 次跳变，'
-                                   f'画面检测异常，跳出稳定等待')
-                    break
+            if stall_count >= 150:
+                logger.warning('[大世界-摄像机] 长时间未确认稳定，画面检测异常，跳出稳定等待')
+                break
 
             record = current
 
@@ -442,12 +442,17 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         clicked_story_count = 0
 
         confirm_timer.reset()
-        # homo_loca 连续跳变计数：深渊海域等场景瓦片匹配持续失败时
-        # homo_loca 在多个错误位置间震荡，稳定条件永远无法满足，
-        # 循环会无限卡死。连续跳变 15 次视为画面检测异常，跳出等待
-        # 由外层循环重新截图决策（点击/移动会促使镜头重新对齐恢复）。
-        # 正常舰队移动 2~4 秒内结束、战斗走事件分支，均不会误触。
-        jump_count = 0
+        # 卡死兜底：正常移动确认最长实测 54 秒/144 帧（长距离移动+检测
+        # 坏帧混杂，稳定窗靠振荡中偶然凑齐）；深渊海域死锁段实测 61 秒/
+        # 166 帧后 GameStuckError 崩任务（敏感任务禁止自动重启）。
+        # stall_count 统计"在地图内、无事件、未确认稳定"的连续轮次：
+        # 事件分支(战斗/剧情/明石等)continue 不计数，IN_MAP 不匹配
+        # (战斗/弹窗画面)清零，仅画面在地图内且确认不通过时累积。
+        # 上限 200 轮(~70 秒)：正常段(最大 144 帧)留有余量，死锁段
+        # (166 帧)可截住；即使正常段超限误跳出，代价仅是外层重新点击
+        # 重试一轮(点击促使镜头重新对齐恢复，与手动干预同原理)，远好
+        # 于 GameStuckError 停机。
+        stall_count = 0
 
         def abyssal_expected_end():
             # 添加 handle_map_event() 因为 OSCombat.combat_status() 会移除 get_items
@@ -568,20 +573,18 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
                 logger.attr('单应位置', current)
                 # 已知最大距离为 4.48px，homo_loca 在 (56, 60) 和 (52, 58) 之间
                 if record is None or (current is not None and np.linalg.norm(np.subtract(current, record)) < 5.5):
-                    jump_count = 0
                     if confirm_timer.reached():
                         break
                 else:
                     confirm_timer.reset()
-                    jump_count += 1
-                    if jump_count >= 15:
-                        logger.warning(f'[大世界-移动] homo_loca 连续 {jump_count} 次跳变，'
-                                       f'画面检测异常，跳出稳定等待')
-                        break
                 record = current
+                stall_count += 1
+                if stall_count >= 200:
+                    logger.warning('[大世界-移动] 长时间未确认稳定，画面检测异常，跳出稳定等待')
+                    break
             else:
                 confirm_timer.reset()
-                jump_count = 0
+                stall_count = 0
 
         result = '_'.join(result)
         logger.info(f'[大世界-移动] 移动已稳定, 结果: {result}')
