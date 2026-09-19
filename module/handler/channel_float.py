@@ -63,24 +63,29 @@ def _scale_area(area, width, height):
 def channel_float_position(image):
     """定位悬浮球：返回球中心坐标，未识别到返回 None。
 
-    悬浮球半透明难以直接识别，但其顶部带有绿色「○○○」标志。
-    在左上识别区内统计绿色像素并排除头像框旁绿色箭头（原生UI），
-    绿色质心即绿标中心，向下偏移约 30px 为球中心。悬浮球每次启动
-    停靠位置不固定，动态定位取代硬编码拖拽起点。
+    悬浮球半透明难以直接识别，但其顶部带有绿色「○○○」标志
+    （三个小圆点横排）。在左上识别区内统计绿色像素并排除头像框旁
+    绿色箭头（原生UI），绿标中心向下偏移约 30px 为球中心。
+
+    为避免识别区内其他绿色元素（UI图标、活动角标等）拉偏质心，
+    先做连通域分析，将同一水平线（y 中心差<=15px）且彼此邻近
+    （x 中心距<=60px）的小块聚为一组，多点横排的组优先（三点
+    标志特征），其次取最靠上的一组，组内按像素加权求质心。
 
     Args:
-        image: 当前截图（1280x720）。
+        image: 当前截图。
 
     Returns:
         tuple: 球中心坐标 (x, y)；未识别到时 None。
     """
-    area = _scale_area(CHANNEL_FLOAT_AREA, image.shape[1], image.shape[0])
+    height, width = image.shape[:2]
+    area = _scale_area(CHANNEL_FLOAT_AREA, width, height)
     area_img = crop(image, area, copy=False)
     r = area_img[:, :, 0].astype(np.int16)
     g = area_img[:, :, 1].astype(np.int16)
     b = area_img[:, :, 2].astype(np.int16)
     green = (g > r + 15) & (g > b + 15) & (g > 100)
-    ex = _scale_area(CHANNEL_FLOAT_EXCLUDE_AREA, image.shape[1], image.shape[0])
+    ex = _scale_area(CHANNEL_FLOAT_EXCLUDE_AREA, width, height)
     x0 = max(ex[0] - area[0], 0)
     y0 = max(ex[1] - area[1], 0)
     x1 = min(ex[2] - area[0], green.shape[1])
@@ -90,12 +95,38 @@ def channel_float_position(image):
     if count < CHANNEL_FLOAT_GREEN_THRESHOLD:
         logger.info(f'[渠道悬浮球] 绿色标志像素 {count}，未识别到悬浮球')
         return None
-    ys, xs = np.where(green)
-    offset_y = int(CHANNEL_FLOAT_BALL_CENTER_OFFSET_Y * image.shape[0] / 720)
-    cx = int(xs.mean()) + area[0]
-    cy = int(ys.mean()) + area[1] + offset_y
-    logger.info(f'[渠道悬浮球] 绿色标志像素 {count}，定位球中心 ({cx}, {cy})')
-    return (cx, cy)
+    n, _, stats, centroids = cv2.connectedComponentsWithStats(green.astype(np.uint8), 8)
+    y_tol = int(15 * height / 720)
+    x_tol = int(60 * width / 1280)
+    comps = []
+    for i in range(1, n):
+        a = stats[i, cv2.CC_STAT_AREA]
+        if a >= 8:
+            comps.append((centroids[i][0], centroids[i][1], a))
+    groups = []
+    for cx, cy, _ in sorted(comps, key=lambda c: (c[1], c[0])):
+        for group in groups:
+            if any(abs(cy - cy2) <= y_tol and abs(cx - cx2) <= x_tol
+                   for cx2, cy2, _ in group):
+                group.append((cx, cy, _))
+                break
+        else:
+            groups.append([(cx, cy, _)])
+    # 多点横排（三点标志）优先，其次最靠上，再次面积最大
+    best = max(
+        groups,
+        key=lambda group: (
+            len(group) >= 2,
+            -sum(c[1] for c in group) / len(group),
+            sum(c[2] for c in group)))
+    total = sum(c[2] for c in best)
+    cx = sum(c[0] * c[2] for c in best) / total + area[0]
+    cy = sum(c[1] * c[2] for c in best) / total + area[1]
+    offset_y = int(CHANNEL_FLOAT_BALL_CENTER_OFFSET_Y * height / 720)
+    ball = (int(cx), int(cy) + offset_y)
+    logger.info(f'[渠道悬浮球] 绿色标志像素 {count}，绿标组 {len(best)}/{len(groups)}，'
+                f'定位球中心 {ball}')
+    return ball
 
 
 def hide_button(image):
