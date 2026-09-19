@@ -387,16 +387,26 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         """
         logger.hr('等待摄像机稳定')
         record = None
+        jump_count = 0
         confirm_timer = Timer(0.6, count=2).start()
         for _ in self.loop(skip_first=skip_first_screenshot):
             self.update_os()
             current = self.view.backend.homo_loca
             logger.attr('单应位置', current)
             if record is None or (current is not None and np.linalg.norm(np.subtract(current, record)) < 3):
+                jump_count = 0
                 if confirm_timer.reached():
                     break
             else:
                 confirm_timer.reset()
+                # 深渊海域等场景瓦片匹配持续失败，homo_loca 在多个错误
+                # 位置间震荡，稳定条件永远无法满足。连续跳变视为画面
+                # 检测异常，跳出等待由外层循环重新截图决策。
+                jump_count += 1
+                if jump_count >= 15:
+                    logger.warning(f'[大世界-摄像机] homo_loca 连续 {jump_count} 次跳变，'
+                                   f'画面检测异常，跳出稳定等待')
+                    break
 
             record = current
 
@@ -432,6 +442,12 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
         clicked_story_count = 0
 
         confirm_timer.reset()
+        # homo_loca 连续跳变计数：深渊海域等场景瓦片匹配持续失败时
+        # homo_loca 在多个错误位置间震荡，稳定条件永远无法满足，
+        # 循环会无限卡死。连续跳变 15 次视为画面检测异常，跳出等待
+        # 由外层循环重新截图决策（点击/移动会促使镜头重新对齐恢复）。
+        # 正常舰队移动 2~4 秒内结束、战斗走事件分支，均不会误触。
+        jump_count = 0
 
         def abyssal_expected_end():
             # 添加 handle_map_event() 因为 OSCombat.combat_status() 会移除 get_items
@@ -552,13 +568,20 @@ class OSFleet(OSCamera, Combat, Fleet, OSAsh):
                 logger.attr('单应位置', current)
                 # 已知最大距离为 4.48px，homo_loca 在 (56, 60) 和 (52, 58) 之间
                 if record is None or (current is not None and np.linalg.norm(np.subtract(current, record)) < 5.5):
+                    jump_count = 0
                     if confirm_timer.reached():
                         break
                 else:
                     confirm_timer.reset()
+                    jump_count += 1
+                    if jump_count >= 15:
+                        logger.warning(f'[大世界-移动] homo_loca 连续 {jump_count} 次跳变，'
+                                       f'画面检测异常，跳出稳定等待')
+                        break
                 record = current
             else:
                 confirm_timer.reset()
+                jump_count = 0
 
         result = '_'.join(result)
         logger.info(f'[大世界-移动] 移动已稳定, 结果: {result}')
